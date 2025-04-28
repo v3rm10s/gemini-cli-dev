@@ -33,18 +33,21 @@ The goal is to create a smoother, more intuitive "vibe coding" experience by int
 
 1.  **Clone the Repository:**
     ```bash
-    git clone <your-repository-url> # Replace with your repo URL
-    cd <your-repository-directory>
+    git clone https://github.com/v3rm10s/gemini-cli-dev.git # Replace with your repo URL
+    cd gemini-cli-dev
     ```
 
 2.  **Create a Virtual Environment:** (Recommended)
     ```bash
     python -m venv venv
     # Activate it:
+
     # Linux/macOS:
     source venv/bin/activate
+
     # Windows (Command Prompt):
     .\venv\Scripts\activate
+
     # Windows (PowerShell):
     .\venv\Scripts\Activate.ps1
     ```
@@ -73,7 +76,7 @@ The tool requires your Google Gemini API key to function.
     # .env
     GOOGLE_API_KEY='YOUR_API_KEY_HERE'
     ```
-    *(Ensure `.env` is listed in your `.gitignore` file to avoid committing your key!)*
+    *(Ensure `.env` is listed in your `.gitignore` file to avoid committing your key if you ever want to push to your own repo!)*
 
 ## Usage
 
