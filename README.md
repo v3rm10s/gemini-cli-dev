@@ -131,6 +131,13 @@ python gemini_dev.py git-commit-msg --diff-args ""
 # Create a basic Flask app structure
 python gemini_dev.py create-project "a simple flask web server with a single hello world route" -d ./my_flask_app
 ```
+## Screenshots
+
+![geminicli01](https://github.com/user-attachments/assets/90ab4c4b-cf4f-4ec1-958b-196c9f644cbc)
+
+![geminicli02](https://github.com/user-attachments/assets/9ed758a2-e584-439b-bf8c-2a2d63d85180)
+
+![geminicli03](https://github.com/user-attachments/assets/32812e0a-c0f3-4b1f-ae65-dd8a872a592f)
 
 ## Contributing
 
