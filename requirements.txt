@@ -1,0 +1,6 @@
+# requirements.txt
+google-generativeai
+python-dotenv
+click
+rich
+inquirerpy
