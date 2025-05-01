@@ -2,95 +2,120 @@
 # gemini_dev.py
 
 import os
-import sys # Retained for sys.exit calls
+import sys
 import click
 import google.generativeai as genai
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
+import google.ai.generativelanguage as glm
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.markdown import Markdown
 import subprocess
 import re
+import json
 from pathlib import Path
+from typing import List
 
 # --- Configuration ---
 load_dotenv()
 console = Console()
 GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
-# As of late April 2025, gemini-1.5-pro-latest is a strong choice. Adjust if needed.
-MODEL_NAME = "gemini-1.5-pro-latest"
+MODEL_NAME = "gemini-2.0-pro-latest"
+HISTORY_FILE = Path("chat_history.json")
 
-# --- Gemini Model Initialization ---
+# --- Gemini Model Initialization & History Loading ---
 if not GEMINI_API_KEY:
-    console.print("[bold red]Error: GOOGLE_API_KEY not found in environment or .env file.[/bold red]")
+    console.print("[bold red]Error: GOOGLE_API_KEY not found.[/bold red]")
     sys.exit(1)
-
 try:
     genai.configure(api_key=GEMINI_API_KEY)
-    # Adjust safety threshold as needed: BLOCK_NONE, BLOCK_ONLY_HIGH, BLOCK_MEDIUM_AND_ABOVE, BLOCK_LOW_AND_ABOVE
-    safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-    ]
-
-    # System instruction to guide the AI's behavior and response format
+    safety_settings = { #	BLOCK_NONE, BLOCK_LOW_AND_ABOVE, BLOCK_MEDIUM_AND_ABOVE, BLOCK_ONLY_HIGH
+        HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+        HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+    }
     system_instruction = (
-        "You are 'Gemini-Dev', an expert AI coding assistant operating in a CLI environment. "
-        "Prioritize clear, concise, and accurate code generation and explanations. "
-        "Format code blocks appropriately using Markdown fenced code blocks (e.g., ```python ... ```). "
-        "When asked to create a project structure, provide output formatted strictly as:\n"
-        "FILE: path/to/your/file.ext\n"
-        "```language\n"
-        "# Content for the file goes here\n"
-        "```\n"
-        "(Repeat for each file, ensure FILE: prefix is on its own line before the code block)\n\n"
-        "Assume you are interacting with a Cloud Infrastructure Engineer studying AI/Automation. "
-        "Be ready to assist with Python, CloudFormation/Terraform, Dockerfiles, shell scripts, and AI/ML concepts/code."
+         "You are 'Gemini-Dev', an expert AI coding assistant..."
     )
-
     model = genai.GenerativeModel(
         model_name=MODEL_NAME,
         safety_settings=safety_settings,
         system_instruction=system_instruction,
     )
-    # Start a chat session for conversation history within a single run
-    chat = model.start_chat(history=[])
-
 except Exception as e:
-    console.print(f"[bold red]Error configuring Gemini API with model {MODEL_NAME}: {e}[/bold red]")
+    console.print(f"[bold red]Error configuring Gemini API: {e}[/bold red]")
     sys.exit(1)
 
+# --- History Loading/Saving Functions ---
+def load_history() -> List[glm.Content]:
+    """Loads chat history from the JSON file."""
+    history = []
+    if HISTORY_FILE.exists():
+        try:
+            with open(HISTORY_FILE, 'r', encoding='utf-8') as f: history_data = json.load(f)
+            for item in history_data:
+                 parts = [part['text'] for part in item.get('parts', []) if 'text' in part]
+                 if item.get('role') and parts:
+                     history.append(glm.Content(role=item.get('role'), parts=[glm.Part(text=p) for p in parts]))
+            if history: console.print(f"[dim]Loaded {len(history)//2} previous exchanges from {HISTORY_FILE}[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not load/parse history from {HISTORY_FILE}: {e}[/yellow]")
+            history = []
+    return history
+
+def save_history(history: List[glm.Content]):
+    """Saves chat history to the JSON file."""
+    try:
+        history_data = []
+        for msg in history:
+             parts_data = [{'text': part.text} for part in msg.parts if hasattr(part, 'text')]
+             if msg.role and parts_data:
+                  history_data.append({'role': msg.role, 'parts': parts_data})
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history_data, f, indent=2)
+    except Exception as e:
+        console.print(f"[bold red]Error saving chat history: {e}[/bold red]")
+
+# --- Initialize Chat Object ---
+loaded_history = load_history()
+chat = model.start_chat(history=loaded_history)
 
 # --- Helper Function for Code Extraction ---
+# (extract_code function remains the same)
 def extract_code(text, language=None):
     """Extracts the first code block, optionally matching a language identifier."""
-    pattern = r"```(\w+)?\s*\n(.*?)\n```" # Regex to find fenced code blocks
+    pattern = r"```(\w+)?\s*\n(.*?)\n```"
     matches = re.findall(pattern, text, re.DOTALL)
-
-    if not matches:
-        return None # No code blocks found
-
+    if not matches: return None
     if language:
         for lang, code in matches:
-            if lang and lang.lower() == language.lower():
-                return code.strip()
-        # If specific language not found, fall back to first block
-        console.print(f"[yellow]Warning: No specific '{language}' code block found. Falling back to first block if any.[/yellow]")
-
-    return matches[0][1].strip() # Return the content of the first block
+            if lang and lang.lower() == language.lower(): return code.strip()
+        console.print(f"[yellow]Warning: No specific '{language}' code block. Falling back to first block.[/yellow]")
+    return matches[0][1].strip()
 
 
 # --- CLI Command Group Definition ---
 @click.group()
-def cli():
+@click.option('--clear-history', is_flag=True, help='Clear the chat history before running.')
+def cli(clear_history):
     """
-    Gemini-Dev: Your AI-powered CLI development assistant.
+    Gemini-Dev: Your AI-powered CLI development assistant with history.
 
-    Use commands like 'ask', 'git-commit-msg', 'create-project'.
-    Run '<command> --help' for details on each command.
+    Run without arguments for a simple menu or specify a command directly.
+    Use --clear-history to start fresh when using direct commands.
     """
+    global chat
+    if clear_history:
+        if HISTORY_FILE.exists():
+            try:
+                HISTORY_FILE.unlink()
+                console.print(f"[yellow]Chat history file {HISTORY_FILE} cleared.[/yellow]")
+                if 'chat' in globals(): chat.history.clear()
+            except OSError as e: console.print(f"[bold red]Error clearing history file: {e}[/bold red]")
+        else: console.print("[yellow]No chat history file found to clear.[/yellow]")
     pass
+
 
 # --- 'ask' Command ---
 @cli.command()
@@ -98,51 +123,42 @@ def cli():
 @click.option('--context-file', '-c', type=click.Path(exists=True, dir_okay=False, resolve_path=True), help='Path to a file to provide as context.')
 @click.option('--output-file', '-o', type=click.Path(resolve_path=True), help='Path to save the generated code/output directly.')
 @click.option('--extract-language', '-l', type=str, help='Attempt to extract code only of this language (e.g., python, bash).')
-def ask(prompt, context_file, output_file, extract_language):
+@click.option('--generate-tests', '-t', is_flag=True, help='Request generation of unit tests (pytest) for the code.')
+def ask(prompt, context_file, output_file, extract_language, generate_tests):
     """Ask Gemini a question or request code generation/explanation."""
+    global chat
     full_prompt = prompt
     if context_file:
         try:
-            with open(context_file, 'r', encoding='utf-8') as f:
-                context_content = f.read()
-            # Add clear markers for context
+            with open(context_file, 'r', encoding='utf-8') as f: context_content = f.read()
             full_prompt = f"--- CONTEXT FROM FILE: {Path(context_file).name} ---\n```\n{context_content}\n```\n\n--- USER PROMPT ---\n{prompt}"
             console.print(f"[cyan]Using context from:[/cyan] {context_file}")
-        except Exception as e:
-            console.print(f"[bold red]Error reading context file {context_file}: {e}[/bold red]")
-            return
+        except Exception as e: console.print(f"[bold red]Error reading context: {e}[/bold red]"); return
+
+    if generate_tests:
+        full_prompt += "\n\n--- ADDITIONAL REQUEST ---\nPlease also provide relevant unit tests for the primary code generated above, using the pytest framework..."
+        console.print("[cyan]Requesting test generation (pytest)...[/cyan]")
 
     console.print(f"[yellow]Sending request to Gemini ({MODEL_NAME})...[/yellow]")
     try:
         response = chat.send_message(full_prompt)
         response_text = response.text
-
         console.print("\n[bold green]--- Gemini Response ---[/bold green]")
         console.print(Markdown(response_text))
         console.print("[bold green]--- End Response ---[/bold green]\n")
-
-        # Extract and save code/output if requested
+        save_history(chat.history)
         if output_file:
-            content_to_save = None
-            if extract_language:
-                content_to_save = extract_code(response_text, extract_language)
-
-            if not content_to_save:
-                # Fallback to first code block or entire text if no blocks/language match
-                content_to_save = extract_code(response_text) or response_text
-
-            try:
-                Path(output_file).parent.mkdir(parents=True, exist_ok=True)
-                with open(output_file, 'w', encoding='utf-8') as f:
-                    f.write(content_to_save)
-                console.print(f"[bold green]Output successfully saved to:[/bold green] {output_file}")
-            except Exception as e:
-                console.print(f"[bold red]Error writing to output file {output_file}: {e}[/bold red]")
-
+             content_to_save = None
+             if extract_language: content_to_save = extract_code(response_text, extract_language)
+             if not content_to_save: content_to_save = extract_code(response_text) or response_text
+             try:
+                 Path(output_file).parent.mkdir(parents=True, exist_ok=True)
+                 with open(output_file, 'w', encoding='utf-8') as f: f.write(content_to_save)
+                 console.print(f"[bold green]Output saved to:[/bold green] {output_file}")
+             except Exception as e: console.print(f"[bold red]Error writing file: {e}[/bold red]")
     except Exception as e:
-        console.print(f"[bold red]Error communicating with Gemini: {e}[/bold red]")
-        if hasattr(e, 'response') and hasattr(e.response, 'prompt_feedback'):
-             console.print(f"[bold red]Prompt Feedback:[/bold red] {e.response.prompt_feedback}")
+         console.print(f"[bold red]Error communicating with Gemini: {e}[/bold red]")
+         if hasattr(e, 'response') and hasattr(e.response, 'prompt_feedback'): console.print(f"[bold red]Prompt Feedback:[/bold red] {e.response.prompt_feedback}")
 
 
 # --- 'git-commit-msg' Command ---
@@ -150,43 +166,6 @@ def ask(prompt, context_file, output_file, extract_language):
 @click.option('--diff-args', default='--staged', help='Arguments for git diff (default: --staged). Use "" for unstaged.')
 def git_commit_msg(diff_args):
     """Suggests a Git commit message based on changes."""
-    git_command = ['git', 'diff']
-    if diff_args:
-        git_command.extend(diff_args.split())
-
-    console.print(f"[cyan]Running: {' '.join(git_command)}[/cyan]")
-    try:
-        diff_process = subprocess.run(git_command, capture_output=True, text=True, check=False, encoding='utf-8')
-
-        if diff_process.returncode != 0:
-            console.print(f"[bold red]Error running git diff (Code: {diff_process.returncode}):[/bold red]")
-            console.print(diff_process.stderr)
-            return
-
-        git_diff = diff_process.stdout
-        if not git_diff.strip():
-            console.print(f"[yellow]No changes detected with 'git diff {diff_args}'.[/yellow]")
-            return
-
-        prompt = (
-            "Based on the following git diff, please generate one or more concise and informative commit message suggestions "
-            "following conventional commit standards (e.g., feat:, fix:, chore:, docs:, style:, refactor:, test:). "
-            "Provide only the commit message(s), each on a new line, without any preamble or explanation."
-            f"\n\n--- GIT DIFF ---\n```diff\n{git_diff}\n```\n--- END DIFF ---"
-        )
-
-        console.print(f"[yellow]Generating commit message suggestion via Gemini ({MODEL_NAME})...[/yellow]")
-        try:
-            response = chat.send_message(prompt)
-            console.print("[bold green]Suggested Commit Message(s):[/bold green]")
-            console.print(response.text.strip())
-        except Exception as e:
-            console.print(f"[bold red]Error communicating with Gemini: {e}[/bold red]")
-
-    except FileNotFoundError:
-         console.print("[bold red]Error: 'git' command not found. Is Git installed and in your PATH?[/bold red]")
-    except Exception as e:
-        console.print(f"[bold red]An unexpected error occurred during git diff: {e}[/bold red]")
 
 
 # --- 'create-project' Command ---
@@ -196,61 +175,146 @@ def git_commit_msg(diff_args):
 def create_project(description, output_dir):
     """Generates a basic project structure based on a description using Gemini."""
 
-    prompt = (
-        f"Generate a basic project file structure for the following description: '{description}'.\n"
-        "Strictly follow the output format specified in the system instructions: list each file to create "
-        "with its relative path prefixed by 'FILE: ' on its own line, followed immediately by a Markdown code block "
-        "containing the file's content. Include relevant files like source code (e.g., main.py), .gitignore, requirements.txt (if applicable), etc."
-    )
 
-    console.print(f"[yellow]Generating project structure via Gemini ({MODEL_NAME})...[/yellow]")
-    try:
-        response = chat.send_message(prompt)
-        response_text = response.text
+# --- NEW: Simple Text Menu Function ---
+def run_simple_menu():
+    """Displays a simple text menu to choose and run commands."""
+    global chat # Needed to clear history
 
-        console.print("\n[bold cyan]--- Proposed Project Structure (Raw Response) ---[/bold cyan]")
-        console.print(Markdown(response_text))
-        console.print("[bold cyan]--- End Proposed Structure ---[/bold cyan]\n")
+    console.print("\n[bold cyan]Welcome to Gemini-Dev Menu![/bold cyan]")
+    console.print("\nCurrent Loaded Model:",MODEL_NAME.upper())
 
-        pattern = r"^FILE:\s*(.+?)\s*?\n```(?:\w+)?\s*\n(.*?)\n```" # Regex to find FILE: path and code block
-        matches = re.findall(pattern, response_text, re.MULTILINE | re.DOTALL)
+    # Define menu items: (command_key, description)
+    # command_key should match the click command function name or be a special key like 'exit'
+    menu_items = [
+        ("ask", "Ask Gemini (Code Gen, Explain, etc.)"),
+        ("git_commit_msg", "Suggest Git Commit Message"),
+        ("create_project", "Create New Project Structure"),
+        ("clear_history", "Clear Chat History"),
+        ("exit", "Exit")
+    ]
 
-        if not matches:
-            console.print("[bold red]Error: Could not parse the project structure from Gemini's response.[/bold red]")
-            console.print("[yellow]Please check the raw response above. Ensure the model followed the 'FILE: path/file.ext' format.[/yellow]")
-            return
+    while True:
+        print("\nPlease choose an action:")
+        for i, item in enumerate(menu_items):
+            print(f"  {i + 1}. {item[1]}") # Display number and description
 
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
+        try:
+            choice_str = input("Enter your choice (number): ").strip()
+            if not choice_str.isdigit():
+                print("Invalid input. Please enter a number.")
+                continue
 
-        created_files_count = 0
-        for rel_path_str, content in matches:
-            rel_path = Path(rel_path_str.strip())
-            abs_path = (output_path / rel_path).resolve()
+            choice_num = int(choice_str)
+            if not 1 <= choice_num <= len(menu_items):
+                print("Invalid choice number.")
+                continue
 
-            if output_path.resolve() not in abs_path.parents and abs_path != output_path.resolve():
-                 console.print(f"[bold red]Security Error: Path '{rel_path}' attempts to escape the output directory '{output_path}'. Skipping.[/bold red]")
+            command_key, _ = menu_items[choice_num - 1]
+
+            if command_key == "exit":
+                break
+
+            if command_key == "clear_history":
+                confirm_clear = input(f"Are you sure you want to delete {HISTORY_FILE}? (y/n): ").lower().strip()
+                if confirm_clear == 'y':
+                    if HISTORY_FILE.exists():
+                        try:
+                            HISTORY_FILE.unlink()
+                            console.print(f"[yellow]Chat history file {HISTORY_FILE} cleared.[/yellow]")
+                            if 'chat' in globals(): chat.history.clear() # Clear in-memory
+                        except OSError as e: console.print(f"[bold red]Error clearing history file: {e}[/bold red]")
+                    else: console.print("[yellow]No chat history file found to clear.[/yellow]")
+                else:
+                    print("Clear history cancelled.")
+                continue # Go back to menu choices
+
+            # --- Gather arguments for the chosen command using input() ---
+            kwargs = {}
+            selected_command_func = cli.get_command(None, command_key)
+            if not selected_command_func: # Should not happen if menu keys match commands
+                 print(f"Error: Command '{command_key}' not found internally.")
                  continue
 
+            console.print(f"\n[bold]--- Running: {command_key} ---[/bold]")
+
+            # Iterate through the command's parameters (defined in @click decorators)
+            for param in selected_command_func.params:
+                if isinstance(param, click.Argument):
+                    # Loop until valid input for required arguments
+                    while True:
+                        value = input(f"Enter value for '{param.name}': ").strip()
+                        if value or not param.required: # Accept empty if not required (though args usually are)
+                            kwargs[param.name] = value
+                            break
+                        else:
+                            print(f"'{param.name}' is required.")
+                elif isinstance(param, click.Option):
+                    # Handle options (flags, values)
+                    prompt_text = f"{param.help} Enter value for '--{param.name}' (or press Enter to skip): "
+                    if param.is_flag:
+                        value_str = input(f"{param.help} Use '--{param.name}'? (y/n): ").lower().strip()
+                        kwargs[param.name] = (value_str == 'y')
+                    else:
+                        # Optional value parameters
+                        value = input(prompt_text).strip()
+                        if value: # Only add kwarg if user provided a value
+                            # Attempt type conversion if needed (basic example)
+                            try:
+                                kwargs[param.name] = param.type(value) if param.type else value
+                            except Exception:
+                                print(f"Warning: Could not convert input '{value}' for {param.name}. Using as string.")
+                                kwargs[param.name] = value
+                        elif param.default is not None:
+                             # If user skips, but there's a default (besides None), keep it
+                             # This logic might need refinement based on desired default behavior
+                             pass # Let click handle default
+                        # else: value is empty, no default, don't add to kwargs
+
+            # --- Invoke the selected Click command ---
             try:
-                abs_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(abs_path, 'w', encoding='utf-8') as f:
-                    f.write(content.strip())
-                console.print(f"[green]Created:[/green] {abs_path}")
-                created_files_count += 1
+                ctx = click.Context(selected_command_func)
+                ctx.ensure_object(dict)
+                # Pass False for clear_history; menu handles it separately
+                ctx.params = {'clear_history': False}
+                ctx.invoke(selected_command_func, **kwargs)
+                console.print(f"[bold]--- Finished: {command_key} ---[/bold]")
+            except Exception as invoke_err:
+                 console.print(f"[bold red]Error running command '{command_key}': {invoke_err}[/bold red]")
+                 import traceback; traceback.print_exc() # Show full error for debugging
 
-            except Exception as e:
-                console.print(f"[bold red]Error creating file {abs_path}: {e}[/bold red]")
+            # Ask if user wants to perform another action
+            continue_choice = input("\nPerform another action? (y/n): ").lower().strip()
+            if continue_choice != 'y':
+                break
 
-        if created_files_count > 0:
-            console.print(f"\n[bold green]Project structure based on '{description}' created successfully in '{output_path}'. ({created_files_count} file(s))[/bold green]")
-        else:
-            console.print("[yellow]No files were created based on the parsed response.[/yellow]")
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting menu.") # Handle Ctrl+D or Ctrl+C during input
+            break
+        except Exception as e:
+            console.print(f"[bold red]An unexpected error occurred in menu: {e}[/bold red]")
+            import traceback; traceback.print_exc()
+            break
 
-    except Exception as e:
-        console.print(f"[bold red]Error during project creation or communication with Gemini: {e}[/bold red]")
+    console.print("[bold yellow]Exiting Gemini-Dev.[/bold yellow]")
 
 
 # --- Main Execution Guard ---
 if __name__ == '__main__':
-    cli()
+    if len(sys.argv) == 1:
+        # No command-line arguments provided, run the simple text menu
+        run_simple_menu()
+    else:
+        # Command-line arguments were provided, let Click handle them
+        try:
+             # Pass standalone_mode=False to prevent Click from exiting on errors handled here
+             # However, need to handle potential exceptions from Click itself if options are bad
+             cli(standalone_mode=False)
+        except click.exceptions.Abort:
+             console.print("[yellow]Operation aborted.[/yellow]")
+        except Exception as e:
+            # Catch potential issues during Click processing (like bad args)
+            console.print(f"[bold red]An error occurred during CLI processing: {e}[/bold red]")
+            # Consider showing help or full traceback
+            # import traceback; traceback.print_exc()
+            sys.exit(1)
